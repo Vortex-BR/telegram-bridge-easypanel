@@ -21,11 +21,14 @@ FIELD_2 = os.getenv("FIELD_2", "fcp")
 DEFAULT_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "75"))
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL_SECONDS", "1.5"))
 BRIDGE_TOKEN = os.getenv("BRIDGE_TOKEN", "")
+AUTO_CONFIRM_BUTTONS = os.getenv("AUTO_CONFIRM_BUTTONS", "true").lower() in ("1", "true", "yes", "sim")
+CONFIRM_BUTTON_TEXT = os.getenv("CONFIRM_BUTTON_TEXT", "Confirmar")
+CONFIRM_WAIT_SECONDS = float(os.getenv("CONFIRM_WAIT_SECONDS", "18"))
 
 if not TG_API_ID or not TG_API_HASH or not TG_SESSION_STRING or not BOT_USERNAME:
     print("[WARN] Configure TG_API_ID, TG_API_HASH, TG_SESSION_STRING e BOT_USERNAME nas variáveis de ambiente.")
 
-app = FastAPI(title="Telegram HTML Bridge", version="1.0.0")
+app = FastAPI(title="Telegram HTML Bridge", version="1.1.0")
 client = TelegramClient(StringSession(TG_SESSION_STRING), TG_API_ID, TG_API_HASH)
 telegram_lock = asyncio.Lock()
 
@@ -114,6 +117,38 @@ def is_html_candidate(message) -> bool:
     return "<html" in text or FIELD_1.lower() in text or FIELD_2.lower() in text
 
 
+def normalize_button_text(value: str) -> str:
+    value = clean_value(value or "").lower()
+    value = re.sub(r"[^a-z0-9à-ÿ]+", " ", value, flags=re.I).strip()
+    return value
+
+
+def button_matches(text: str, target: str) -> bool:
+    a = normalize_button_text(text)
+    b = normalize_button_text(target)
+    if not a or not b:
+        return False
+    return a == b or b in a
+
+
+async def try_click_confirm_button(message) -> tuple[bool, str]:
+    if not AUTO_CONFIRM_BUTTONS:
+        return False, "auto_confirm_disabled"
+
+    buttons = getattr(message, "buttons", None)
+    if not buttons:
+        return False, "no_buttons"
+
+    for i, row in enumerate(buttons):
+        for j, button in enumerate(row):
+            text = getattr(button, "text", "") or ""
+            if button_matches(text, CONFIRM_BUTTON_TEXT):
+                await message.click(i, j)
+                return True, text
+
+    return False, "confirm_button_not_found"
+
+
 @app.on_event("startup")
 async def startup():
     await client.connect()
@@ -128,7 +163,7 @@ async def shutdown():
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "bot": BOT_USERNAME, "fields": [FIELD_1, FIELD_2]}
+    return {"ok": True, "bot": BOT_USERNAME, "fields": [FIELD_1, FIELD_2], "auto_confirm_buttons": AUTO_CONFIRM_BUTTONS, "confirm_button_text": CONFIRM_BUTTON_TEXT}
 
 
 @app.post("/consultar")
@@ -152,12 +187,32 @@ async def consultar(payload: ConsultaRequest, x_bridge_token: Optional[str] = He
         sent = await client.send_message(bot, command)
         started_at = time.time()
         deadline = started_at + timeout
+        confirm_deadline = started_at + min(CONFIRM_WAIT_SECONDS, timeout)
         last_error = ""
+        confirm_clicked = False
+        confirm_button_text = ""
+        checked_button_message_ids = set()
 
         while time.time() < deadline:
             # Busca apenas mensagens novas depois do comando enviado para evitar pegar HTML antigo.
-            messages = await client.get_messages(bot, limit=12, min_id=sent.id)
+            messages = await client.get_messages(bot, limit=20, min_id=sent.id)
             for msg in reversed(messages):
+                # Alguns bots pedem confirmação via botão antes de enviar o HTML.
+                # Ex.: "✅ Confirmar Pesquisa". O bridge clica uma única vez.
+                if AUTO_CONFIRM_BUTTONS and not confirm_clicked and msg.id not in checked_button_message_ids:
+                    checked_button_message_ids.add(msg.id)
+                    if time.time() <= confirm_deadline:
+                        try:
+                            clicked, clicked_text = await try_click_confirm_button(msg)
+                            if clicked:
+                                confirm_clicked = True
+                                confirm_button_text = clicked_text
+                                # Dá um pequeno tempo para o bot processar o callback.
+                                await asyncio.sleep(1.0)
+                                break
+                        except Exception as exc:
+                            last_error = f"Erro ao clicar no botão de confirmação: {exc}"
+
                 if not is_html_candidate(msg):
                     continue
                 html_text, filename = await download_message_html(msg)
@@ -171,6 +226,8 @@ async def consultar(payload: ConsultaRequest, x_bridge_token: Optional[str] = He
                     "bot": BOT_USERNAME,
                     "telegram_message_id": msg.id,
                     "telegram_file_name": filename,
+                    "confirm_clicked": confirm_clicked,
+                    "confirm_button_text": confirm_button_text,
                     "elapsed_seconds": round(time.time() - started_at, 2),
                     **parsed,
                     "error": "" if status == "FOUND" else f"HTML encontrado, mas não foi possível extrair todos os campos: {FIELD_1}, {FIELD_2}",
@@ -185,6 +242,8 @@ async def consultar(payload: ConsultaRequest, x_bridge_token: Optional[str] = He
             FIELD_1: "",
             FIELD_2: "",
             "telegram_file_name": "",
+            "confirm_clicked": confirm_clicked,
+            "confirm_button_text": confirm_button_text,
             "elapsed_seconds": round(time.time() - started_at, 2),
             "error": last_error or f"Nenhum HTML recebido em {timeout}s",
         }

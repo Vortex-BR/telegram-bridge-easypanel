@@ -11,9 +11,12 @@ TG_API_ID=123456
 TG_API_HASH=seu_api_hash
 TG_SESSION_STRING=sua_session_string
 BOT_USERNAME=@username_do_bot
-COMMAND_TEMPLATE=/consulta {cnpj_digits}
-FIELD_1=nm
-FIELD_2=fcp
+COMMAND_TEMPLATE=/cnpj {cnpj_digits}
+FIELD_1=nome
+FIELD_2=cpf
+AUTO_CONFIRM_BUTTONS=true
+CONFIRM_BUTTON_TEXT=Confirmar
+CONFIRM_WAIT_SECONDS=18
 REQUEST_TIMEOUT_SECONDS=75
 POLL_INTERVAL_SECONDS=1.5
 BRIDGE_TOKEN=crie_um_token_forte_aqui
@@ -55,11 +58,13 @@ Resposta esperada:
 ```json
 {
   "status": "FOUND",
-  "nm": "valor extraido",
-  "fcp": "valor extraido",
+  "nome": "valor extraido",
+  "cpf": "valor extraido",
+  "confirm_clicked": true,
+  "confirm_button_text": "✅ Confirmar Pesquisa",
   "telegram_file_name": "arquivo.html",
   "bot": "@username_do_bot",
-  "command": "/consulta 00000000000100"
+  "command": "/cnpj 00000000000100"
 }
 ```
 
@@ -81,3 +86,15 @@ Use um node HTTP Request:
 ```
 
 Depois use Google Sheets `Append or Update` para salvar `nm` e `fcp` na linha do lead.
+
+## Bot com botão de confirmação
+
+Se o bot pedir para clicar em um botão como `✅ Confirmar Pesquisa`, deixe estas variáveis no Easypanel:
+
+```env
+AUTO_CONFIRM_BUTTONS=true
+CONFIRM_BUTTON_TEXT=Confirmar
+CONFIRM_WAIT_SECONDS=18
+```
+
+O bridge vai enviar o comando, aguardar a mensagem do bot com botões, clicar no botão que contém `Confirmar` e depois continuar aguardando o `.html`.
